@@ -351,7 +351,7 @@ def visualize_rule_results(experiment_results, fixed_support):
         conf_labels, rule_counts, color='orange', width=0.4, edgecolor='black'
     )
     plt.title(
-        'Количество правил при различных порогах достоверности',
+        f'Количество правил при различных порогах достоверности\n(min_support = {fixed_support * 100:.1f}%)',
         fontsize=12,
         fontweight='bold',
     )
