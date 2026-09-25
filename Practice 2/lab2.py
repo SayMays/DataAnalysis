@@ -14,7 +14,6 @@ import pandas as pd
 
 file_path = "baskets.csv"
 
-
 def load_from_csv(file_path):
     """
     Загружает транзакции из CSV-файла.
@@ -38,8 +37,7 @@ def load_from_csv(file_path):
 
 # 2. Реализация алгоритма Apriori
 
-
-def apriori(transactions, min_support=0.05, sort_by='support_desc'):
+def apriori(transactions, min_support=0.05,  sort_by='support_desc'):
     """
     Реализует алгоритм Apriori для поиска частых наборов товаров в транзакциях.
 
@@ -141,11 +139,10 @@ def apriori(transactions, min_support=0.05, sort_by='support_desc'):
 
 # 3. Поиск ассоциативных правил
 
-
 def generate_association_rules(
     frequent_itemsets,
     support_dict,
-    min_confidence=0.70,
+    min_confidence=0.50,
     sort_by='support_desc',
 ):
     """
@@ -157,8 +154,8 @@ def generate_association_rules(
         min_confidence (float): Минимальный порог достоверности (от 0.0 до 1.0).
         sort_by (str): Критерий сортировки правил ('support_desc' или 'lexicographic').
 
-    Возвращаемое значение:
-        rules (list of dict): Список словарей с характеристиками правил (antecedent, consequent, support, confidence, total_size).
+    Возвращаемое значение: rules (list of dict): Список словарей с характеристиками правил (antecedent, consequent,
+    support, confidence, total_size).
     """
     rules = []
 
@@ -209,7 +206,6 @@ def generate_association_rules(
 
 # 4. Эксперименты с правилами при фиксированной поддержке
 
-
 def run_rule_experiments(
     file_path,
     fixed_support=0.01,
@@ -230,7 +226,7 @@ def run_rule_experiments(
         experiment_results (list of dict): Список словарей, содержащих результаты и метрики эксперимента.
     """
     if conf_thresholds is None:
-        conf_thresholds = [0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60, 0.65, 0.70]
+        conf_thresholds = [0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
 
     print(f"Загрузка данных из файла {file_path}...")
     transactions = load_from_csv(file_path)
@@ -256,7 +252,7 @@ def run_rule_experiments(
             print(
                 f"Запуск генерации правил для min_confidence = {conf * 100:.0f}%..."
             )
-            start_time = time.time()
+            start_time = time.perf_counter()
 
             rules = generate_association_rules(
                 frequent_itemsets,
@@ -265,7 +261,7 @@ def run_rule_experiments(
                 sort_by=sort_by,
             )
 
-            elapsed_time = time.time() - start_time
+            elapsed_time = time.perf_counter() - start_time
 
             experiment_results.append({
                 'confidence_thresh': conf,
@@ -300,7 +296,6 @@ def run_rule_experiments(
 
 
 # 5. Визуализация результатов правил
-
 
 def visualize_rule_results(experiment_results, fixed_support):
     """
@@ -370,8 +365,7 @@ def visualize_rule_results(experiment_results, fixed_support):
     print("График количества правил сохранен в файл 'rules_count.png'.")
 
 
-# 6. Фильтрация разумных правил
-
+# 6. Фильтрация правил по достоверности
 
 def print_filtered_rules(experiment_results, target_conf=0.5, max_size=7):
     """
@@ -386,7 +380,7 @@ def print_filtered_rules(experiment_results, target_conf=0.5, max_size=7):
         None (функция выводит список правил в консоль).
     """
     print(
-        f"\n=== Список разумных правил (Достоверность >= {target_conf * 100:.0f}%, Объектов <= {max_size}) ==="
+        f"\nСписок наиболее достоверных правил (Достоверность >= {target_conf * 100:.0f}%, Объектов <= {max_size}):"
     )
 
     target_exp = next(
