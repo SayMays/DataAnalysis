@@ -2,8 +2,11 @@
 Название файла: lab3.py
 Семантика файла: Программа предназначена для классификации набора данных Census Income
 с помощью дерева решений. Поддерживаются три критерия выбора атрибута разбиения: Information gain,
-Gain ratio, Gini index. Программа строит три дерева (по одному на критерий) на 100% данных и рисует
-каждое на отдельном графике, а также для всех трёх критериев варьирует долю обучающей выборки
+Gain ratio, Gini index. Числовые атрибуты разбиваются по порогу на две ветви (x <= t и x > t),
+категориальные - многосторонне (по одной ветви на каждое значение атрибута).
+Программа строит три дерева (по одному на критерий) на 100% данных и рисует
+каждое на отдельном графике (на графике показаны не все узлы - только верхние уровни и
+наиболее крупные ветви), а также для всех трёх критериев варьирует долю обучающей выборки
 (60%, 70%, 80%, 90%), считает accuracy, precision, recall, F-меру и строит график зависимости
 показателей от доли.
 """
@@ -18,6 +21,7 @@ TRAIN_FILE = "adult.data.txt"  # файл обучающей выборки
 TEST_FILE = "adult.test.txt"  # файл тестовой выборки
 MAX_DEPTH = 10  # максимальная глубина строящегося дерева
 VIZ_DEPTH = 3  # глубина отображения деревьев на графиках
+MAX_VIZ_CHILDREN = 3  # максимум ветвей у категориального узла, показываемых на графике
 SEED = 42  # начальное значение генератора случайных чисел
 RATIOS = [0.6, 0.7, 0.8, 0.9]  # доли обучающей выборки во втором эксперименте
 
@@ -162,10 +166,10 @@ def split_info(sizes):
 
 def best_split(data, idx, attrs, criterion):
     """
-    Выбирает лучшее бинарное разбиение узла. Для числового атрибута перебираются все пороги
-    между соседними различными значениями, для категориального - все условия "значение = v"
-    (векторизованно через кумулятивные суммы и таблицу частот). Внутри атрибута разбиение
-    выбирается по максимальному приросту информации (уменьшению индекса Джини). Для Gain ratio
+    Выбирает лучший атрибут для разбиения узла. Для числового атрибута перебираются все пороги
+    между соседними различными значениями (бинарное разбиение x <= t / x > t, порог выбирается
+    векторизованно через кумулятивные суммы). Для категориального атрибута разбиение
+    многостороннее: по одной ветви на каждое значение, встретившееся в узле. Для Gain ratio
     применяется схема C4.5: среди атрибутов с приростом не ниже среднего выбирается максимум
     отношения прироста к Split Info.
 
@@ -176,8 +180,8 @@ def best_split(data, idx, attrs, criterion):
         criterion (str): Критерий выбора атрибута.
 
     Возвращаемое значение:
-        best (tuple | None): (номер атрибута, порог или код категории, прирост) либо None,
-        если полезного разбиения не найдено.
+        best (tuple | None): (номер атрибута, порог для числового атрибута или None для
+        категориального, прирост) либо None, если полезного разбиения не найдено.
     """
 
     ys = data["y"][idx]
@@ -185,17 +189,7 @@ def best_split(data, idx, attrs, criterion):
     k = len(CLASSES)
     total = np.bincount(ys, minlength=k).astype(float)
     parent = impurity(total[None, :], criterion)[0]
-    cands = []  # (attr, value, gain, split_info)
-
-    def evaluate(left):
-        right = total - left
-        nl = left.sum(axis=1)
-        nr = n - nl
-        child = (nl * impurity(left, criterion) + nr * impurity(right, criterion)) / n
-        gains = parent - child
-        b = int(np.argmax(gains))
-        si = split_info(np.stack([nl, nr], axis=1))[b]
-        return b, gains[b], si
+    cands = []  # (attr, threshold, gain, split_info)
 
     for j in attrs:
         x = data["cols"][j][idx]
@@ -208,17 +202,26 @@ def best_split(data, idx, attrs, criterion):
             onehot = np.zeros((n, k))
             onehot[np.arange(n), yo] = 1.0
             left = np.cumsum(onehot, axis=0)[:-1][valid]
-            b, gain, si = evaluate(left)
+            right = total - left
+            nl = left.sum(axis=1)
+            nr = n - nl
+            child = (nl * impurity(left, criterion) + nr * impurity(right, criterion)) / n
+            gains = parent - child
+            b = int(np.argmax(gains))
+            si = split_info(np.stack([nl, nr], axis=1))[b]
             thr = (xs[:-1][valid][b] + xs[1:][valid][b]) / 2.0
-            cands.append((j, thr, gain, si))
+            cands.append((j, thr, gains[b], si))
         else:
             c = len(data["cats"][j])
             counts = np.bincount(x * k + ys, minlength=c * k).reshape(c, k).astype(float)
-            present = np.where(counts.sum(axis=1) > 0)[0]
-            if len(present) < 2:
+            sizes = counts.sum(axis=1)
+            present = sizes > 0
+            if present.sum() < 2:
                 continue
-            b, gain, si = evaluate(counts[present])
-            cands.append((j, int(present[b]), gain, si))
+            counts, sizes = counts[present], sizes[present]
+            child = (sizes * impurity(counts, criterion)).sum() / n
+            si = split_info(sizes[None, :])[0]
+            cands.append((j, None, parent - child, si))
 
     cands = [c for c in cands if c[2] > 1e-12]
     if not cands:
@@ -240,13 +243,14 @@ def best_split(data, idx, attrs, criterion):
 
 def build_tree(data, idx, attrs, criterion, depth=0, max_depth=MAX_DEPTH, min_samples_split=2):
     """
-    Рекурсивно строит бинарное дерево решений. Узел - словарь: 'n' (число объектов), 'counts'
+    Рекурсивно строит дерево решений. Узел - словарь: 'n' (число объектов), 'counts'
     (распределение по классам), 'pred' (мажоритарный класс). Внутренний узел дополнительно имеет
-    'attr' (атрибут), 'value' (порог для числового атрибута или код категории для категориального)
-    и 'children' = [левый потомок (условие выполнено), правый потомок (не выполнено)].
-    Условие: x <= value для числового атрибута, x == value для категориального.
-    Рост прекращается, если узел чистый, достигнута максимальная глубина, объектов слишком
-    мало или нет полезного разбиения.
+    'attr' (атрибут), 'thr' (порог для числового атрибута, иначе None), 'values' (коды значений
+    категориального атрибута, по одному на каждого потомка; для числового None) и 'children'
+    (список потомков). У числового атрибута два потомка: [x <= thr, x > thr]; у категориального -
+    по одному потомку на каждое значение, встретившееся в узле. Использованный категориальный
+    атрибут исключается из доступных на данной ветви. Рост прекращается, если узел чистый,
+    достигнута максимальная глубина, объектов слишком мало или нет полезного разбиения.
 
     Входные параметры:
         data (dict): Закодированный набор данных.
@@ -264,27 +268,36 @@ def build_tree(data, idx, attrs, criterion, depth=0, max_depth=MAX_DEPTH, min_sa
     ys = data["y"][idx]
     counts = np.bincount(ys, minlength=len(CLASSES))
     node = {"n": len(idx), "counts": counts.tolist(), "pred": int(np.argmax(counts)),
-            "attr": None, "value": None, "children": []}
+            "attr": None, "thr": None, "values": None, "children": []}
     if (counts.max() == len(idx) or len(idx) < min_samples_split or not attrs
             or (max_depth is not None and depth >= max_depth)):
         return node
     res = best_split(data, idx, attrs, criterion)
     if res is None:
         return node
-    j, value, _ = res
-    node["attr"], node["value"] = j, value
+    j, thr, _ = res
+    node["attr"], node["thr"] = j, thr
     x = data["cols"][j][idx]
-    mask = (x <= value) if data["is_num"][j] else (x == value)
-    for sub in (idx[mask], idx[~mask]):
-        node["children"].append(
-            build_tree(data, sub, attrs, criterion, depth + 1, max_depth, min_samples_split))
+    if thr is not None:
+        mask = x <= thr
+        for sub in (idx[mask], idx[~mask]):
+            node["children"].append(
+                build_tree(data, sub, attrs, criterion, depth + 1, max_depth, min_samples_split))
+    else:
+        rest = [a for a in attrs if a != j]
+        node["values"] = [int(v) for v in np.unique(x)]
+        for v in node["values"]:
+            node["children"].append(
+                build_tree(data, idx[x == v], rest, criterion, depth + 1, max_depth, min_samples_split))
     return node
 
 
 def predict(tree, data, idx):
     """
-    Классифицирует объекты с помощью бинарного дерева решений: в каждом узле проверяется
-    условие разбиения, объект направляется в левую (условие выполнено) или правую ветвь.
+    Классифицирует объекты с помощью дерева решений. В числовом узле объект направляется
+    в ветвь x <= thr или x > thr, в категориальном - в ветвь, соответствующую его значению.
+    Если значение категориального атрибута не встречалось при обучении в данном узле,
+    возвращается мажоритарный класс этого узла.
 
     Входные параметры:
         tree (dict): Корень дерева (результат build_tree).
@@ -303,11 +316,18 @@ def predict(tree, data, idx):
         if node["attr"] is None:
             out[pos] = node["pred"]
             return
-        j = node["attr"]
-        x = data["cols"][j][idx[pos]]
-        m = (x <= node["value"]) if data["is_num"][j] else (x == node["value"])
-        rec(node["children"][0], pos[m])
-        rec(node["children"][1], pos[~m])
+        x = data["cols"][node["attr"]][idx[pos]]
+        if node["thr"] is not None:
+            m = x <= node["thr"]
+            rec(node["children"][0], pos[m])
+            rec(node["children"][1], pos[~m])
+        else:
+            known = np.zeros(len(pos), dtype=bool)
+            for v, child in zip(node["values"], node["children"]):
+                m = x == v
+                known |= m
+                rec(child, pos[m])
+            out[pos[~known]] = node["pred"]
 
     rec(tree, np.arange(len(idx)))
     return out
@@ -384,18 +404,22 @@ def run_experiment(data, criterion, train_ratio, max_depth=MAX_DEPTH, seed=SEED)
 
 # 6. Визуализация
 
-def build_view(node, data, depth, viz_depth):
+def build_view(node, data, depth, viz_depth, max_children=MAX_VIZ_CHILDREN):
     """
-    Строит упрощённое представление дерева для построения графика: обрезает дерево по глубине
-    viz_depth. Нижние узлы (листья и узлы на границе глубины) содержат подпись и цвет класса.
-    Если дерево в узле продолжается, но обрезано, добавляется пометка об этом.
-    Внутренний узел содержит вопрос о разбиении, левая ветвь подписана "да", правая - "нет".
+    Строит упрощённое представление дерева для построения графика. Выводятся не все узлы:
+    дерево обрезается по глубине viz_depth, а у категориального узла показываются только
+    max_children самых крупных ветвей (по числу объектов), остальные заменяются одним блоком
+    "Прочие (k знач.)". Нижние узлы (листья и узлы на границе глубины) содержат подпись
+    "Класс: ..." и цвет класса; если дерево в узле продолжается, но обрезано, добавляется
+    пометка. Внутренний узел содержит название атрибута, ветви подписаны условием
+    ("<= t" / "> t" для числового атрибута, значением для категориального).
 
     Входные параметры:
         node (dict): Узел дерева.
         data (dict): Закодированный набор данных (для названий атрибутов и категорий).
         depth (int): Глубина узла.
         viz_depth (int): Максимальная отображаемая глубина.
+        max_children (int): Максимум отображаемых ветвей у категориального узла.
 
     Возвращаемое значение:
         view (dict): Узел представления: 'text', 'color', 'children' (список (подпись, view)).
@@ -408,41 +432,54 @@ def build_view(node, data, depth, viz_depth):
     if node["attr"] is None or depth >= viz_depth:
         mark = "" if node["attr"] is None else "\n(далее...)"
         return {"text": "Класс: %s\n%s%s" % (cls, stat, mark), "color": color, "children": []}
+
     j = node["attr"]
-    name = data["names"][j]
-    if data["is_num"][j]:
-        question = "%s <= %.4g ?" % (name, node["value"])
-    else:
-        question = "%s = %s ?" % (name, data["cats"][j][node["value"]])
-    view = {"text": "%s\n%s" % (question, stat), "color": "#ffffff", "children": []}
-    for label, ch in zip(("да", "нет"), node["children"]):
-        view["children"].append((label, build_view(ch, data, depth + 1, viz_depth)))
+    view = {"text": "%s ?\n%s" % (data["names"][j], stat), "color": "#ffffff", "children": []}
+    if node["thr"] is not None:
+        labels = ["<= %.4g" % node["thr"], "> %.4g" % node["thr"]]
+        for label, ch in zip(labels, node["children"]):
+            view["children"].append((label, build_view(ch, data, depth + 1, viz_depth, max_children)))
+        return view
+
+    kids = [(data["cats"][j][v], ch) for v, ch in zip(node["values"], node["children"])]
+    kids.sort(key=lambda t: -t[1]["n"])
+    shown, hidden = kids[:max_children], kids[max_children:]
+    for label, ch in shown:
+        view["children"].append((label[:16], build_view(ch, data, depth + 1, viz_depth, max_children)))
+    if hidden:
+        hc = np.sum([ch["counts"] for _, ch in hidden], axis=0)
+        hcls = int(np.argmax(hc))
+        view["children"].append(("...", {
+            "text": "Прочие (%d знач.)\nКласс: %s\nn=%d [%d / %d]"
+                    % (len(hidden), CLASSES[hcls], int(hc.sum()), hc[0], hc[1]),
+            "color": "#f4a582" if hcls == 1 else "#92c5de", "children": []}))
     return view
 
 
 def layout_view(view, depth, counter):
     """
-    Назначает узлам представления координаты: листья располагаются слева направо,
-    родитель - по центру над своими потомками.
+    Назначает узлам представления координаты для горизонтального дерева (слева направо):
+    координата x равна глубине узла, листья располагаются сверху вниз по оси y,
+    родитель - по центру напротив своих потомков.
 
     Входные параметры:
         view (dict): Узел представления (результат build_view).
         depth (int): Глубина узла.
-        counter (list): Список из одного элемента - следующая свободная x-позиция.
+        counter (list): Список из одного элемента - номер следующей свободной строки (y-позиции).
 
     Возвращаемое значение:
         None. Координаты записываются в поля 'x' и 'y' узлов.
     """
 
-    view["y"] = -depth
+    view["x"] = depth
     if not view["children"]:
-        view["x"] = counter[0]
+        view["y"] = -counter[0]
         counter[0] += 1
         return
     for _, ch in view["children"]:
         layout_view(ch, depth + 1, counter)
-    xs = [ch["x"] for _, ch in view["children"]]
-    view["x"] = sum(xs) / len(xs)
+    ys = [ch["y"] for _, ch in view["children"]]
+    view["y"] = sum(ys) / len(ys)
 
 
 def draw_view(ax, view):
@@ -469,11 +506,11 @@ def draw_view(ax, view):
 
 def plot_tree(tree, data, criterion, viz_depth=VIZ_DEPTH, path=None):
     """
-    Рисует одно бинарное дерево решений на отдельном графике. Отображается верхняя часть
-    дерева (до глубины viz_depth), т.к. полное дерево содержит сотни узлов.
-    Цвет блока: голубой - класс <=50K, оранжевый - класс >50K.
-    В нижних узлах явно подписан класс.
-    Подписи рёбер: "да" - условие в узле выполнено, "нет" - не выполнено.
+    Рисует одно дерево решений на отдельном графике, ориентированном слева направо
+    (корень слева, листья справа). Отображается верхняя часть дерева
+    (до глубины viz_depth) и только самые крупные ветви категориальных узлов, т.к. полное
+    дерево содержит сотни узлов. Цвет блока: голубой - класс <=50K, оранжевый - класс >50K.
+    В нижних узлах явно подписан класс. Подписи рёбер - условия ветвления.
 
     Входные параметры:
         tree (dict): Корень дерева.
@@ -489,17 +526,17 @@ def plot_tree(tree, data, criterion, viz_depth=VIZ_DEPTH, path=None):
     view = build_view(tree, data, 0, viz_depth)
     counter = [0]
     layout_view(view, 0, counter)
-    fig, ax = plt.subplots(figsize=(max(14, counter[0] * 2.4), 2.6 * (viz_depth + 1)))
+    fig, ax = plt.subplots(figsize=(4.6 * (viz_depth + 1), max(7, counter[0] * 1.15)))
     draw_view(ax, view)
     nodes, leaves = count_nodes(tree)
     ax.set_title("Дерево решений (разбиение по %s): всего узлов: %d, листьев: %d, показано до глубины %d"
                  % (CRITERIA_TITLES[criterion], nodes, leaves, viz_depth), fontsize=13)
-    ax.set_xlim(-1, counter[0])
-    ax.set_ylim(-viz_depth - 0.6, 0.6)
+    ax.set_xlim(-0.6, viz_depth + 0.6)
+    ax.set_ylim(-(counter[0] - 1) - 0.8, 0.8)
     ax.axis("off")
     ax.legend(handles=[Patch(fc="#92c5de", ec="black", label="класс <=50K"),
                        Patch(fc="#f4a582", ec="black", label="класс >50K")],
-              loc="upper left", fontsize=10)
+              loc="lower left", fontsize=10)
     fig.tight_layout()
     if path:
         fig.savefig(path, dpi=130)
